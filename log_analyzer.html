@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Log Analyzer Using Regular Expressions</title>
+<style>
+  :root { --navy:#1F3864; --blue:#2F5496; --bg:#F4F6FA; --line:#D5DBE7; --err:#C00000; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family: "Segoe UI", Arial, sans-serif; background:var(--bg); color:#1b1b1b; }
+  header { background:var(--navy); color:#fff; padding:18px 24px; }
+  header h1 { margin:0; font-size:20px; }
+  header p { margin:4px 0 0; font-size:13px; opacity:.85; }
+  main { max-width:1000px; margin:20px auto; padding:0 16px 40px; }
+  .card { background:#fff; border:1px solid var(--line); border-radius:8px; padding:16px; margin-bottom:16px; }
+  textarea { width:100%; height:190px; font-family: Consolas, "Courier New", monospace; font-size:13px; padding:10px; border:1px solid var(--line); border-radius:6px; resize:vertical; }
+  button { background:var(--blue); color:#fff; border:0; border-radius:6px; padding:9px 18px; font-size:14px; cursor:pointer; margin-right:8px; }
+  button.secondary { background:#fff; color:var(--blue); border:1px solid var(--blue); }
+  .stats { display:grid; grid-template-columns:repeat(auto-fit,minmax(130px,1fr)); gap:10px; }
+  .stat { background:var(--bg); border-radius:6px; padding:10px; text-align:center; }
+  .stat b { display:block; font-size:22px; color:var(--navy); }
+  .stat span { font-size:12px; color:#555; }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th { background:var(--navy); color:#fff; text-align:left; padding:7px 9px; }
+  td { padding:6px 9px; border-bottom:1px solid var(--line); font-family: Consolas, monospace; }
+  tr.error td { background:#FDE9E9; color:var(--err); font-weight:600; }
+  .bad { background:#FFF4E5; border-left:4px solid #E08A00; padding:8px 10px; margin:6px 0; font-family:Consolas,monospace; font-size:13px; }
+  h2 { font-size:16px; color:var(--navy); margin:0 0 10px; }
+  .hidden { display:none; }
+  code { font-family:Consolas,monospace; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Log Analyzer Using Regular Expressions</h1>
+  <p>Format: YYYY-MM-DD HH:MM:SS LEVEL STATUS_CODE IP_ADDRESS &nbsp;|&nbsp; same five regexes as log_analyzer.py</p>
+</header>
+<main>
+  <div class="card">
+    <h2>Paste log lines</h2>
+    <textarea id="input" spellcheck="false"></textarea>
+    <p>
+      <label>Count status code: <input id="code" value="404" size="4"></label>
+    </p>
+    <button id="analyze">Analyze</button>
+    <button id="sample" class="secondary">Load sample</button>
+    <button id="clear" class="secondary">Clear</button>
+  </div>
+
+  <div id="results" class="hidden">
+    <div class="card"><h2>Summary</h2><div class="stats" id="stats"></div></div>
+    <div class="card"><h2>Extracted records (ERROR rows highlighted)</h2>
+      <table><thead><tr><th>Line</th><th>Timestamp</th><th>Level</th><th>Code</th><th>IP address</th></tr></thead><tbody id="rows"></tbody></table>
+    </div>
+    <div class="card"><h2>Invalid lines</h2><div id="invalid"></div></div>
+  </div>
+</main>
+
+<script>
+// ---------- CORE (same patterns as log_analyzer.py) ----------
+const TIMESTAMP = String.raw`\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01]) ([01]\d|2[0-3]):[0-5]\d:[0-5]\d`;
+const OCTET = String.raw`(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)`;
+const IPV4 = '(' + OCTET + String.raw`\.){3}` + OCTET;
+const LEVEL = String.raw`\b(DEBUG|INFO|WARNING|ERROR|CRITICAL)\b`;
+const STATUS = String.raw`[1-5]\d{2}`;
+const ERROR_ENTRY = '^' + TIMESTAMP + ' ERROR ' + STATUS + ' ' + IPV4 + '$';
+const LINE = new RegExp('^(?<ts>' + TIMESTAMP + ') (?<level>' + LEVEL + ') (?<code>' + STATUS + ') (?<ip>' + IPV4 + ')$');
+const ERROR_RE = new RegExp(ERROR_ENTRY);
+const full = (p, s) => new RegExp('^(?:' + p + ')$').test(s);
+
+function diagnose(line) {
+  const parts = line.split(' ');
+  if (parts.length !== 5) return 'expected 5 fields: date time level code ip';
+  if (!full(TIMESTAMP, parts[0] + ' ' + parts[1])) return 'invalid timestamp';
+  if (!full(LEVEL, parts[2])) return 'unknown log level';
+  if (!full(STATUS, parts[3])) return 'invalid status code';
+  if (!full(IPV4, parts[4])) return 'invalid IPv4 address';
+  return 'does not match the log format';
+}
+
+function analyse(text, wantedCode) {
+  const lines = text.split('\n').map(l => l.replace(/\r$/, '')).filter(l => l.trim() !== '');
+  const records = [], invalid = [], levels = {};
+  let errors = 0;
+  lines.forEach((line, i) => {
+    const m = LINE.exec(line);
+    if (m) {
+      const isErr = ERROR_RE.test(line);
+      if (isErr) errors++;
+      levels[m.groups.level] = (levels[m.groups.level] || 0) + 1;
+      records.push({ n: i + 1, ts: m.groups.ts, level: m.groups.level, code: m.groups.code, ip: m.groups.ip, isErr });
+    } else {
+      invalid.push({ n: i + 1, line, reason: diagnose(line) });
+    }
+  });
+  return {
+    total: lines.length, records, invalid, errors, levels,
+    withCode: records.filter(r => r.code === wantedCode).length,
+    uniqueIps: new Set(records.map(r => r.ip)).size
+  };
+}
+// ---------- END CORE ----------
+
+const SAMPLE = `2026-10-28 10:15:20 INFO 200 192.168.1.10
+2026-10-28 10:15:48 INFO 200 192.168.1.12
+2026-10-28 10:16:05 ERROR 404 192.168.1.15
+2026-10-28 10:16:31 WARNING 301 10.0.0.5
+2026-10-28 10:17:42 ERROR 500 10.0.0.8
+2026-10-28 10:18:09 INFO 200 172.16.0.21
+2026-10-28 10:19:27 DEBUG 200 192.168.1.10
+2026-10-28 10:20:03 ERROR 404 203.0.113.45
+2026-10-28 10:21:15 WARNING 403 10.0.0.8
+2026-10-28 10:22:50 INFO 200 192.168.1.12
+2026-10-28 10:23:36 CRITICAL 503 172.16.0.4
+2026-10-28 10:24:12 ERROR 404 192.168.1.15
+2026-10-28 10:25:44 INFO 304 10.0.0.5
+2026-10-28 10:26:58 ERROR 500 172.16.0.21
+2026-10-28 10:27:30 INFO 200 192.168.1.300
+2026-10-28 25:10:00 ERROR 404 192.168.1.15`;
+
+const $ = id => document.getElementById(id);
+function esc(s) { return s.replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c])); }
+
+function render() {
+  const wanted = $('code').value.trim() || '404';
+  const r = analyse($('input').value, wanted);
+  const stat = (v, l) => `<div class="stat"><b>${v}</b><span>${l}</span></div>`;
+  $('stats').innerHTML =
+    stat(r.total, 'lines processed') + stat(r.records.length, 'valid lines') + stat(r.invalid.length, 'invalid lines') +
+    stat(r.errors, 'ERROR entries') + stat(r.withCode, 'entries with code ' + esc(wanted)) + stat(r.uniqueIps, 'unique IPs');
+  $('rows').innerHTML = r.records.map(x =>
+    `<tr class="${x.isErr ? 'error' : ''}"><td>${x.n}</td><td>${x.ts}</td><td>${x.level}</td><td>${x.code}</td><td>${x.ip}</td></tr>`).join('');
+  $('invalid').innerHTML = r.invalid.length
+    ? r.invalid.map(x => `<div class="bad">line ${x.n}: ${esc(x.line)} &rarr; <b>${x.reason}</b></div>`).join('')
+    : '<p>No invalid lines.</p>';
+  $('results').classList.remove('hidden');
+}
+
+$('analyze').onclick = render;
+$('sample').onclick = () => { $('input').value = SAMPLE; render(); };
+$('clear').onclick = () => { $('input').value = ''; $('results').classList.add('hidden'); };
+$('input').value = SAMPLE;
+</script>
+</body>
+</html>
